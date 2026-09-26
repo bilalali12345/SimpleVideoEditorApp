@@ -1,0 +1,690 @@
+package com.bilal.simplevideoeditorapp
+
+import android.net.Uri
+import android.os.Bundle
+import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.ContentCut
+import androidx.compose.material.icons.filled.VideoLibrary
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.MediaItem
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.PlayerView
+import com.bilal.simplevideoeditorapp.ui.theme.SimpleVideoEditorAppTheme
+import com.bilal.simplevideoeditorapp.util.computeClipRangeMs
+import com.bilal.simplevideoeditorapp.util.exportTrimmedVideo
+import com.bilal.simplevideoeditorapp.util.mergeVideos
+
+
+
+class MainActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+        setContent {
+            SimpleVideoEditorAppTheme {
+                Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
+                    VideoEditorApp(modifier = Modifier.padding(innerPadding))
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Every "screen" the app can be on, with just the data that screen needs.
+ * Still no navigation library / view models - just one variable that switches
+ * between a handful of simple states.
+ */
+sealed class AppScreen {
+    object Home : AppScreen()
+    data class Trim(val uri: Uri) : AppScreen()
+    object PickFirstForMerge : AppScreen()
+    data class PickSecondForMerge(val firstUri: Uri) : AppScreen()
+    data class ReadyToMerge(val firstUri: Uri, val secondUri: Uri) : AppScreen()
+}
+
+@Composable
+fun VideoEditorApp(modifier: Modifier = Modifier) {
+    var screen by remember { mutableStateOf<AppScreen>(AppScreen.Home) }
+
+    when (val current = screen) {
+        is AppScreen.Home -> HomeScreen(
+            modifier = modifier,
+            onPickedVideoToTrim = { uri -> screen = AppScreen.Trim(uri) },
+            onStartMerge = { screen = AppScreen.PickFirstForMerge }
+        )
+
+        is AppScreen.Trim -> VideoTrimScreen(
+            modifier = modifier,
+            videoUri = current.uri,
+            onPickDifferentVideo = { screen = AppScreen.Home },
+            // When he chooses to preview the freshly cut video, we just swap
+            // which file is being shown - the original file on disk is never touched.
+            onSwitchToVideo = { newUri -> screen = AppScreen.Trim(newUri) }
+        )
+
+        AppScreen.PickFirstForMerge -> VideoPickerScreen(
+            modifier = modifier,
+            title = "Merge Videos",
+            subtitle = "Choose the FIRST video (it will play first)",
+            onVideoPicked = { uri -> screen = AppScreen.PickSecondForMerge(uri) }
+        )
+
+        is AppScreen.PickSecondForMerge -> VideoPickerScreen(
+            modifier = modifier,
+            title = "Merge Videos",
+            subtitle = "Now choose the SECOND video (it will play right after)",
+            onVideoPicked = { uri -> screen = AppScreen.ReadyToMerge(current.firstUri, uri) }
+        )
+
+        is AppScreen.ReadyToMerge -> MergeScreen(
+            modifier = modifier,
+            firstUri = current.firstUri,
+            secondUri = current.secondUri,
+            onCancel = { screen = AppScreen.Home },
+            // Straight into the trim screen with the merged result, in case he
+            // wants to tidy up the join afterwards.
+            onMergedVideoReady = { mergedUri -> screen = AppScreen.Trim(mergedUri) }
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------------
+// HOME: choose what he wants to do
+// ---------------------------------------------------------------------------------
+@Composable
+fun HomeScreen(
+    modifier: Modifier = Modifier,
+    onPickedVideoToTrim: (Uri) -> Unit,
+    onStartMerge: () -> Unit
+) {
+    val trimPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        uri?.let { onPickedVideoToTrim(it) }
+    }
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Icon(
+            imageVector = Icons.Default.VideoLibrary,
+            contentDescription = null,
+            modifier = Modifier.size(96.dp),
+            tint = MaterialTheme.colorScheme.primary
+        )
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        Text(
+            text = "Video Editor",
+            fontSize = 28.sp,
+            fontWeight = FontWeight.Bold
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Text(
+            text = "What would you like to do?",
+            fontSize = 18.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        Spacer(modifier = Modifier.height(40.dp))
+
+        Button(
+            onClick = { trimPickerLauncher.launch("video/*") },
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(64.dp),
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            Icon(imageVector = Icons.Default.ContentCut, contentDescription = null)
+            Spacer(modifier = Modifier.width(12.dp))
+            Text(text = "Trim a Video", fontSize = 20.sp)
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        OutlinedButton(
+            onClick = onStartMerge,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(64.dp),
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            Icon(imageVector = Icons.Default.VideoLibrary, contentDescription = null)
+            Spacer(modifier = Modifier.width(12.dp))
+            Text(text = "Merge Two Videos", fontSize = 20.sp)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------
+// Reusable: Pick a single video (used for trim-from-Trim-screen re-pick, and both
+// steps of the merge flow)
+// ---------------------------------------------------------------------------------
+@Composable
+fun VideoPickerScreen(
+    modifier: Modifier = Modifier,
+    title: String = "Video Trimmer",
+    subtitle: String = "Choose a video to get started",
+    buttonText: String = "Select Video",
+    onVideoPicked: (Uri) -> Unit
+) {
+    val launcher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        uri?.let { onVideoPicked(it) }
+    }
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Icon(
+            imageVector = Icons.Default.VideoLibrary,
+            contentDescription = null,
+            modifier = Modifier.size(96.dp),
+            tint = MaterialTheme.colorScheme.primary
+        )
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        Text(
+            text = title,
+            fontSize = 28.sp,
+            fontWeight = FontWeight.Bold
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Text(
+            text = subtitle,
+            fontSize = 18.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        Spacer(modifier = Modifier.height(40.dp))
+
+        // Big, easy-to-tap button
+        Button(
+            onClick = { launcher.launch("video/*") },
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(64.dp),
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            Icon(imageVector = Icons.Default.VideoLibrary, contentDescription = null)
+            Spacer(modifier = Modifier.width(12.dp))
+            Text(text = buttonText, fontSize = 20.sp)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------
+// MERGE: both videos picked, ready to join them
+// ---------------------------------------------------------------------------------
+@Composable
+fun MergeScreen(
+    modifier: Modifier = Modifier,
+    firstUri: Uri,
+    secondUri: Uri,
+    onCancel: () -> Unit,
+    onMergedVideoReady: (Uri) -> Unit
+) {
+    val context = LocalContext.current
+    var isProcessing by remember { mutableStateOf(false) }
+    var mergedVideoUri by remember { mutableStateOf<Uri?>(null) }
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Icon(
+            imageVector = Icons.Default.VideoLibrary,
+            contentDescription = null,
+            modifier = Modifier.size(80.dp),
+            tint = MaterialTheme.colorScheme.primary
+        )
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        Text(
+            text = "Ready to Merge",
+            fontSize = 24.sp,
+            fontWeight = FontWeight.Bold
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Text(
+            text = "Both videos are selected. The first one will play, then the second.",
+            fontSize = 16.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        Spacer(modifier = Modifier.height(40.dp))
+
+        Button(
+            onClick = {
+                isProcessing = true
+                mergeVideos(
+                    context = context,
+                    firstUri = firstUri,
+                    secondUri = secondUri,
+                    onSuccess = { newUri ->
+                        isProcessing = false
+                        mergedVideoUri = newUri
+                    },
+                    onError = { message ->
+                        isProcessing = false
+                        Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                    }
+                )
+            },
+            enabled = !isProcessing,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(64.dp),
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            Text(text = "Merge Videos", fontSize = 20.sp)
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        TextButton(
+            onClick = onCancel,
+            enabled = !isProcessing,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(text = "Cancel", fontSize = 16.sp)
+        }
+    }
+
+    if (isProcessing) {
+        AlertDialog(
+            onDismissRequest = { /* not dismissable while working */ },
+            confirmButton = {},
+            title = { Text("Merging Your Videos...") },
+            text = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(modifier = Modifier.size(28.dp))
+                    Spacer(modifier = Modifier.width(16.dp))
+                    Text("This may take a moment. Please don't close the app.")
+                }
+            }
+        )
+    }
+
+    // The merge is done. Both ORIGINAL videos are untouched - this is a brand-new file.
+    if (mergedVideoUri != null) {
+        AlertDialog(
+            onDismissRequest = { mergedVideoUri = null },
+            title = { Text(text = "All Done!", fontWeight = FontWeight.Bold) },
+            text = {
+                Text(
+                    "Your merged video has been saved as a new file. " +
+                            "Both original videos were not changed and are still safe."
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    val newUri = mergedVideoUri!!
+                    mergedVideoUri = null
+                    onMergedVideoReady(newUri)
+                }) {
+                    Text("Play Merged Video")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    mergedVideoUri = null
+                    onCancel()
+                }) {
+                    Text("Done")
+                }
+            }
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------------
+// SCREEN 2: Play + Trim
+// ---------------------------------------------------------------------------------
+@Composable
+fun VideoTrimScreen(
+    modifier: Modifier = Modifier,
+    videoUri: Uri,
+    onPickDifferentVideo: () -> Unit,
+    onSwitchToVideo: (Uri) -> Unit
+) {
+    val context = LocalContext.current
+
+    var showTrimDialog by remember { mutableStateOf(false) }
+    var isPlaying by remember { mutableStateOf(true) }
+    var isProcessing by remember { mutableStateOf(false) }
+    var trimmedVideoUri by remember { mutableStateOf<Uri?>(null) }
+
+    // Keep the player alive across recompositions, release it when we leave the screen
+    val exoPlayer = remember(videoUri) {
+        ExoPlayer.Builder(context).build().apply {
+            setMediaItem(MediaItem.fromUri(videoUri))
+            prepare()
+            playWhenReady = true
+        }
+    }
+
+    DisposableEffect(exoPlayer) {
+        onDispose { exoPlayer.release() }
+    }
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(16.dp)
+    ) {
+        Text(
+            text = "Trim Your Video",
+            fontSize = 24.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(bottom = 12.dp)
+        )
+
+        // Video preview
+        AndroidView(
+            factory = { ctx ->
+                PlayerView(ctx).apply {
+                    player = exoPlayer
+                    useController = true // shows built-in seek bar too
+                }
+            },
+            update = { view -> view.player = exoPlayer },
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .background(androidx.compose.ui.graphics.Color.Black)
+        )
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // Simple, large play/pause button (in addition to the player's own controls)
+        Button(
+            onClick = {
+                if (isPlaying) exoPlayer.pause() else exoPlayer.play()
+                isPlaying = !isPlaying
+            },
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp),
+            shape = RoundedCornerShape(14.dp)
+        ) {
+            Icon(
+                imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                contentDescription = null
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(text = if (isPlaying) "Pause" else "Play", fontSize = 18.sp)
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        // Big "Trim" button - opens the popup
+        Button(
+            onClick = { showTrimDialog = true },
+            enabled = !isProcessing,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(64.dp),
+            shape = RoundedCornerShape(16.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = MaterialTheme.colorScheme.tertiary
+            )
+        ) {
+            Icon(imageVector = Icons.Default.ContentCut, contentDescription = null)
+            Spacer(modifier = Modifier.width(12.dp))
+            Text(text = "Cut Video", fontSize = 20.sp)
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        TextButton(
+            onClick = onPickDifferentVideo,
+            modifier = Modifier.fillMaxWidth(),
+            enabled = !isProcessing
+        ) {
+            Text(text = "Choose a Different Video", fontSize = 16.sp)
+        }
+    }
+
+    if (showTrimDialog) {
+        TrimPopup(
+            onDismiss = { showTrimDialog = false },
+            onConfirm = { cutTimeInput, cutFromStart ->
+                showTrimDialog = false
+
+                val durationMs = exoPlayer.duration
+                val range = computeClipRangeMs(cutTimeInput, cutFromStart, durationMs)
+
+                if (range == null) {
+                    Toast.makeText(
+                        context,
+                        "Please double check the time you entered.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                } else {
+                    isProcessing = true
+                    exportTrimmedVideo(
+                        context = context,
+                        sourceUri = videoUri,
+                        startMs = range.first,
+                        endMs = range.second,
+                        onSuccess = { newUri ->
+                            isProcessing = false
+                            trimmedVideoUri = newUri
+                        },
+                        onError = { message ->
+                            isProcessing = false
+                            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                        }
+                    )
+                }
+            }
+        )
+    }
+
+    // Simple, non-dismissable "working on it" indicator while the cut is being made.
+    if (isProcessing) {
+        AlertDialog(
+            onDismissRequest = { /* not dismissable while working */ },
+            confirmButton = {},
+            title = { Text("Cutting Your Video...") },
+            text = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(modifier = Modifier.size(28.dp))
+                    Spacer(modifier = Modifier.width(16.dp))
+                    Text("This may take a moment. Please don't close the app.")
+                }
+            }
+        )
+    }
+
+    // The cut is done. The ORIGINAL video is untouched - this is always a brand-new file.
+    if (trimmedVideoUri != null) {
+        AlertDialog(
+            onDismissRequest = { trimmedVideoUri = null },
+            title = { Text(text = "All Done!", fontWeight = FontWeight.Bold) },
+            text = {
+                Text(
+                    "Your trimmed video has been saved as a new file. " +
+                            "Your original video was not changed and is still safe."
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    val newUri = trimmedVideoUri!!
+                    trimmedVideoUri = null
+                    onSwitchToVideo(newUri)
+                }) {
+                    Text("Play New Video")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { trimmedVideoUri = null }) {
+                    Text("Done")
+                }
+            }
+        )
+    }
+}
+
+
+// ---------------------------------------------------------------------------------
+// POPUP: Enter the cut point + choose which side gets removed
+// ---------------------------------------------------------------------------------
+@Composable
+fun TrimPopup(
+    onDismiss: () -> Unit,
+    onConfirm: (cutTime: String, cutFromStart: Boolean) -> Unit
+) {
+    var cutTime by remember { mutableStateOf("") }
+    var cutFromStart by remember { mutableStateOf(true) } // true = trim the beginning, false = trim the ending
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(text = "Cut Video", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+        },
+        text = {
+            Column {
+                Text(
+                    text = "What part do you want to remove?",
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Medium
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Simple two-button toggle, easier to tap than a switch for this use case
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    ToggleOptionButton(
+                        text = "From Start",
+                        selected = cutFromStart,
+                        onClick = { cutFromStart = true },
+                        modifier = Modifier.weight(1f)
+                    )
+                    ToggleOptionButton(
+                        text = "From End",
+                        selected = !cutFromStart,
+                        onClick = { cutFromStart = false },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                OutlinedTextField(
+                    value = cutTime,
+                    onValueChange = { cutTime = it },
+                    label = {
+                        Text(if (cutFromStart) "Cut off the beginning, up to:" else "Cut off the ending, starting at:")
+                    },
+                    placeholder = { Text("0:10") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Text(
+                    text = if (cutFromStart)
+                        "Everything from 0:00 to this time will be removed. The rest is kept."
+                    else
+                        "Everything from this time to the end will be removed. The rest is kept.",
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Spacer(modifier = Modifier.height(4.dp))
+
+                Text(
+                    text = "Use minutes:seconds, like 1:30, or just seconds, like 45.",
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onConfirm(cutTime, cutFromStart) },
+                enabled = cutTime.isNotBlank()
+            ) {
+                Text("Cut", fontSize = 16.sp)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel", fontSize = 16.sp)
+            }
+        }
+    )
+}
+
+@Composable
+fun ToggleOptionButton(
+    text: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    if (selected) {
+        Button(
+            onClick = onClick,
+            modifier = modifier.height(48.dp),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Text(text = text, fontSize = 15.sp)
+        }
+    } else {
+        OutlinedButton(
+            onClick = onClick,
+            modifier = modifier.height(48.dp),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Text(text = text, fontSize = 15.sp)
+        }
+    }
+}
