@@ -181,7 +181,7 @@ fun HomeScreen(
             onClick = { trimPickerLauncher.launch("video/*") },
             modifier = Modifier
                 .fillMaxWidth()
-                .height(64.dp),
+                .height(72.dp),
             shape = RoundedCornerShape(16.dp)
         ) {
             Icon(imageVector = Icons.Default.ContentCut, contentDescription = null)
@@ -195,7 +195,7 @@ fun HomeScreen(
             onClick = onStartMerge,
             modifier = Modifier
                 .fillMaxWidth()
-                .height(64.dp),
+                .height(72.dp),
             shape = RoundedCornerShape(16.dp)
         ) {
             Icon(imageVector = Icons.Default.VideoLibrary, contentDescription = null)
@@ -209,7 +209,7 @@ fun HomeScreen(
             onClick = { denoisePickerLauncher.launch("video/*") },
             modifier = Modifier
                 .fillMaxWidth()
-                .height(64.dp),
+                .height(72.dp),
             shape = RoundedCornerShape(16.dp)
         ) {
             // Reusing an icon we already know compiles, rather than guessing at a
@@ -483,7 +483,7 @@ fun DenoiseScreen(
             enabled = !isProcessing,
             modifier = Modifier
                 .fillMaxWidth()
-                .height(64.dp),
+                .height(72.dp),
             shape = RoundedCornerShape(16.dp)
         ) {
             Text(text = "Remove Background Noise", fontSize = 20.sp)
