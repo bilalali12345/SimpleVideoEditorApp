@@ -32,6 +32,7 @@ import com.bilal.simplevideoeditorapp.ui.theme.SimpleVideoEditorAppTheme
 import com.bilal.simplevideoeditorapp.util.TrimMode
 import com.bilal.simplevideoeditorapp.util.computeClipRangeMs
 import com.bilal.simplevideoeditorapp.util.computeMiddleCutBoundsMs
+import com.bilal.simplevideoeditorapp.util.exportDenoisedVideo
 import com.bilal.simplevideoeditorapp.util.exportMiddleTrimmedVideo
 import com.bilal.simplevideoeditorapp.util.exportTrimmedVideo
 import com.bilal.simplevideoeditorapp.util.mergeVideos
@@ -63,6 +64,7 @@ sealed class AppScreen {
     object PickFirstForMerge : AppScreen()
     data class PickSecondForMerge(val firstUri: Uri) : AppScreen()
     data class ReadyToMerge(val firstUri: Uri, val secondUri: Uri) : AppScreen()
+    data class Denoise(val uri: Uri) : AppScreen()
 }
 
 @Composable
@@ -73,7 +75,8 @@ fun VideoEditorApp(modifier: Modifier = Modifier) {
         is AppScreen.Home -> HomeScreen(
             modifier = modifier,
             onPickedVideoToTrim = { uri -> screen = AppScreen.Trim(uri) },
-            onStartMerge = { screen = AppScreen.PickFirstForMerge }
+            onStartMerge = { screen = AppScreen.PickFirstForMerge },
+            onPickedVideoToDenoise = { uri -> screen = AppScreen.Denoise(uri) }
         )
 
         is AppScreen.Trim -> VideoTrimScreen(
@@ -108,6 +111,15 @@ fun VideoEditorApp(modifier: Modifier = Modifier) {
             // wants to tidy up the join afterwards.
             onMergedVideoReady = { mergedUri -> screen = AppScreen.Trim(mergedUri) }
         )
+
+        is AppScreen.Denoise -> DenoiseScreen(
+            modifier = modifier,
+            videoUri = current.uri,
+            onCancel = { screen = AppScreen.Home },
+            // Same idea as merge: land on the trim screen with the cleaned result,
+            // in case he wants to also cut it down afterwards.
+            onCleanedVideoReady = { cleanedUri -> screen = AppScreen.Trim(cleanedUri) }
+        )
     }
 }
 
@@ -118,12 +130,19 @@ fun VideoEditorApp(modifier: Modifier = Modifier) {
 fun HomeScreen(
     modifier: Modifier = Modifier,
     onPickedVideoToTrim: (Uri) -> Unit,
-    onStartMerge: () -> Unit
+    onStartMerge: () -> Unit,
+    onPickedVideoToDenoise: (Uri) -> Unit
 ) {
     val trimPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
         uri?.let { onPickedVideoToTrim(it) }
+    }
+
+    val denoisePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        uri?.let { onPickedVideoToDenoise(it) }
     }
 
     Column(
@@ -182,6 +201,22 @@ fun HomeScreen(
             Icon(imageVector = Icons.Default.VideoLibrary, contentDescription = null)
             Spacer(modifier = Modifier.width(12.dp))
             Text(text = "Merge Two Videos", fontSize = 20.sp)
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        OutlinedButton(
+            onClick = { denoisePickerLauncher.launch("video/*") },
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(64.dp),
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            // Reusing an icon we already know compiles, rather than guessing at a
+            // new one and risking another "unresolved reference" round-trip.
+            Icon(imageVector = Icons.Default.VideoLibrary, contentDescription = null)
+            Spacer(modifier = Modifier.width(12.dp))
+            Text(text = "Remove Background Noise", fontSize = 20.sp)
         }
     }
 }
@@ -373,6 +408,136 @@ fun MergeScreen(
             dismissButton = {
                 TextButton(onClick = {
                     mergedVideoUri = null
+                    onCancel()
+                }) {
+                    Text("Done")
+                }
+            }
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------------
+// DENOISE: one video picked, ready to clean up its audio
+// ---------------------------------------------------------------------------------
+@Composable
+fun DenoiseScreen(
+    modifier: Modifier = Modifier,
+    videoUri: Uri,
+    onCancel: () -> Unit,
+    onCleanedVideoReady: (Uri) -> Unit
+) {
+    val context = LocalContext.current
+    var isProcessing by remember { mutableStateOf(false) }
+    var cleanedVideoUri by remember { mutableStateOf<Uri?>(null) }
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Icon(
+            imageVector = Icons.Default.VideoLibrary,
+            contentDescription = null,
+            modifier = Modifier.size(80.dp),
+            tint = MaterialTheme.colorScheme.primary
+        )
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        Text(
+            text = "Ready to Clean Up the Audio",
+            fontSize = 24.sp,
+            fontWeight = FontWeight.Bold
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Text(
+            text = "This removes steady background noise (fans, wind, hum) from the video's sound. " +
+                    "It won't work miracles on loud noise or other voices.",
+            fontSize = 16.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        Spacer(modifier = Modifier.height(40.dp))
+
+        Button(
+            onClick = {
+                isProcessing = true
+                exportDenoisedVideo(
+                    context = context,
+                    sourceUri = videoUri,
+                    onSuccess = { newUri ->
+                        isProcessing = false
+                        cleanedVideoUri = newUri
+                    },
+                    onError = { message ->
+                        isProcessing = false
+                        Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                    }
+                )
+            },
+            enabled = !isProcessing,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(64.dp),
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            Text(text = "Remove Background Noise", fontSize = 20.sp)
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        TextButton(
+            onClick = onCancel,
+            enabled = !isProcessing,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(text = "Cancel", fontSize = 16.sp)
+        }
+    }
+
+    if (isProcessing) {
+        AlertDialog(
+            onDismissRequest = { /* not dismissable while working */ },
+            confirmButton = {},
+            title = { Text("Cleaning Up the Audio...") },
+            text = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(modifier = Modifier.size(28.dp))
+                    Spacer(modifier = Modifier.width(16.dp))
+                    Text("This can take a little while on longer videos. Please don't close the app.")
+                }
+            }
+        )
+    }
+
+    // The clean-up is done. The ORIGINAL video is untouched - this is a brand-new file.
+    if (cleanedVideoUri != null) {
+        AlertDialog(
+            onDismissRequest = { cleanedVideoUri = null },
+            title = { Text(text = "All Done!", fontWeight = FontWeight.Bold) },
+            text = {
+                Text(
+                    "A cleaned-up copy has been saved as a new file. " +
+                            "Your original video was not changed and is still safe."
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    val newUri = cleanedVideoUri!!
+                    cleanedVideoUri = null
+                    onCleanedVideoReady(newUri)
+                }) {
+                    Text("Play Cleaned Video")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    cleanedVideoUri = null
                     onCancel()
                 }) {
                     Text("Done")

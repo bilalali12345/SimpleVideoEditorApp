@@ -14,6 +14,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.EditedMediaItem
 import androidx.media3.transformer.EditedMediaItemSequence
+import androidx.media3.transformer.Effects
 import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult
 import androidx.media3.transformer.Transformer
@@ -190,6 +191,32 @@ private fun runExport(
         .build()
 
     transformer.start(composition, tempFile.absolutePath)
+}
+
+/**
+ * Runs the video's audio through RNNoise to strip out steady background noise
+ * (fans, wind, hum), leaving the video itself untouched, and writes the result to
+ * a brand-new file in the phone's Videos folder. The original video at
+ * [sourceUri] is never modified or deleted.
+ */
+@UnstableApi
+@OptIn(UnstableApi::class)
+fun exportDenoisedVideo(
+    context: Context,
+    sourceUri: Uri,
+    onSuccess: (Uri) -> Unit,
+    onError: (String) -> Unit
+) {
+    val fileName = "denoised_${System.currentTimeMillis()}.mp4"
+    val tempFile = File(context.cacheDir, fileName)
+
+    val editedMediaItem = EditedMediaItem.Builder(MediaItem.fromUri(sourceUri))
+        .setEffects(Effects(listOf(RNNoiseAudioProcessor()), emptyList()))
+        .build()
+
+    val composition = Composition.Builder(EditedMediaItemSequence(listOf(editedMediaItem))).build()
+
+    runExport(context, composition, tempFile, fileName, onSuccess, onError)
 }
 
 /**
