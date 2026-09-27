@@ -48,8 +48,13 @@ private fun parseTimeToMillis(input: String): Long? {
 }
 
 /**
+ * The three ways he can trim a video.
+ */
+enum class TrimMode { FROM_START, FROM_END, FROM_MIDDLE }
+
+/**
  * Works out which part of the video to KEEP, based on the ONE time he entered and
- * the toggle:
+ * whether he's trimming from the start or the end:
  *  - "From Start": everything from 0:00 up to the time he entered gets REMOVED.
  *     What's kept is: [enteredTime -> end of video].
  *  - "From End": everything from the time he entered to the end of the video gets
@@ -76,6 +81,29 @@ fun computeClipRangeMs(
         // Remove [cutTimeMs -> end], keep [0 -> cutTimeMs]
         0L to cutTimeMs
     }
+}
+
+/**
+ * Works out the (start, end) of the chunk to REMOVE from the middle of the video,
+ * based on the two times he entered. Both times are counted from the beginning of
+ * the video. Returns null if the times don't make sense (out of order, or touching
+ * either edge of the video - use "From Start" / "From End" for those instead).
+ */
+fun computeMiddleCutBoundsMs(
+    removeStartInput: String,
+    removeEndInput: String,
+    videoDurationMs: Long
+): Pair<Long, Long>? {
+    if (videoDurationMs <= 0) return null
+
+    val removeStartMs = parseTimeToMillis(removeStartInput) ?: return null
+    val removeEndMs = parseTimeToMillis(removeEndInput) ?: return null
+
+    if (removeStartMs <= 0 || removeEndMs >= videoDurationMs || removeEndMs <= removeStartMs) {
+        return null
+    }
+
+    return removeStartMs to removeEndMs
 }
 
 /**
@@ -132,6 +160,39 @@ private fun saveVideoToMoviesFolder(
 }
 
 /**
+ * Starts the Transformer job for a given [composition] and, once it finishes, moves the
+ * result into the public Videos folder. Shared by all three export functions below.
+ */
+@UnstableApi
+@OptIn(UnstableApi::class)
+private fun runExport(
+    context: Context,
+    composition: Composition,
+    tempFile: File,
+    fileName: String,
+    onSuccess: (Uri) -> Unit,
+    onError: (String) -> Unit
+) {
+    val transformer = Transformer.Builder(context)
+        .addListener(object : Transformer.Listener {
+            override fun onCompleted(composition: Composition, exportResult: ExportResult) {
+                saveVideoToMoviesFolder(context, tempFile, fileName, onSuccess, onError)
+            }
+
+            override fun onError(
+                composition: Composition,
+                exportResult: ExportResult,
+                exportException: ExportException
+            ) {
+                onError(exportException.message ?: "Something went wrong while processing the video.")
+            }
+        })
+        .build()
+
+    transformer.start(composition, tempFile.absolutePath)
+}
+
+/**
  * Cuts the video down to [startMs, endMs] and ALWAYS writes the result to a brand-new
  * file in the phone's Videos folder - the original video at [sourceUri] is never
  * modified or deleted.
@@ -146,8 +207,6 @@ fun exportTrimmedVideo(
     onSuccess: (Uri) -> Unit,
     onError: (String) -> Unit
 ) {
-    // Media3 Transformer needs to write to a plain file path, so we render into our
-    // own private cache first, then copy the finished file into the public Videos folder.
     val fileName = "trimmed_${System.currentTimeMillis()}.mp4"
     val tempFile = File(context.cacheDir, fileName)
 
@@ -162,24 +221,60 @@ fun exportTrimmedVideo(
         .build()
 
     val editedMediaItem = EditedMediaItem.Builder(mediaItem).build()
+    val composition = Composition.Builder(EditedMediaItemSequence(listOf(editedMediaItem))).build()
 
-    val transformer = Transformer.Builder(context)
-        .addListener(object : Transformer.Listener {
-            override fun onCompleted(composition: Composition, exportResult: ExportResult) {
-                saveVideoToMoviesFolder(context, tempFile, fileName, onSuccess, onError)
-            }
+    runExport(context, composition, tempFile, fileName, onSuccess, onError)
+}
 
-            override fun onError(
-                composition: Composition,
-                exportResult: ExportResult,
-                exportException: ExportException
-            ) {
-                onError(exportException.message ?: "Something went wrong while cutting the video.")
-            }
-        })
-        .build()
+/**
+ * Removes the chunk [removeStartMs, removeEndMs] from the MIDDLE of the video and
+ * stitches the part before it to the part after it, into one brand-new file. The
+ * original video at [sourceUri] is never modified or deleted.
+ */
+@UnstableApi
+@OptIn(UnstableApi::class)
+fun exportMiddleTrimmedVideo(
+    context: Context,
+    sourceUri: Uri,
+    removeStartMs: Long,
+    removeEndMs: Long,
+    videoDurationMs: Long,
+    onSuccess: (Uri) -> Unit,
+    onError: (String) -> Unit
+) {
+    val fileName = "trimmed_${System.currentTimeMillis()}.mp4"
+    val tempFile = File(context.cacheDir, fileName)
 
-    transformer.start(editedMediaItem, tempFile.absolutePath)
+    // The part BEFORE the removed chunk
+    val beforeItem = EditedMediaItem.Builder(
+        MediaItem.Builder()
+            .setUri(sourceUri)
+            .setClippingConfiguration(
+                MediaItem.ClippingConfiguration.Builder()
+                    .setStartPositionMs(0)
+                    .setEndPositionMs(removeStartMs)
+                    .build()
+            )
+            .build()
+    ).build()
+
+    // The part AFTER the removed chunk
+    val afterItem = EditedMediaItem.Builder(
+        MediaItem.Builder()
+            .setUri(sourceUri)
+            .setClippingConfiguration(
+                MediaItem.ClippingConfiguration.Builder()
+                    .setStartPositionMs(removeEndMs)
+                    .setEndPositionMs(videoDurationMs)
+                    .build()
+            )
+            .build()
+    ).build()
+
+    val sequence = EditedMediaItemSequence(listOf(beforeItem, afterItem))
+    val composition = Composition.Builder(sequence).build()
+
+    runExport(context, composition, tempFile, fileName, onSuccess, onError)
 }
 
 /**
@@ -205,21 +300,5 @@ fun mergeVideos(
     val sequence = EditedMediaItemSequence(listOf(firstItem, secondItem))
     val composition = Composition.Builder(sequence).build()
 
-    val transformer = Transformer.Builder(context)
-        .addListener(object : Transformer.Listener {
-            override fun onCompleted(composition: Composition, exportResult: ExportResult) {
-                saveVideoToMoviesFolder(context, tempFile, fileName, onSuccess, onError)
-            }
-
-            override fun onError(
-                composition: Composition,
-                exportResult: ExportResult,
-                exportException: ExportException
-            ) {
-                onError(exportException.message ?: "Something went wrong while joining the videos.")
-            }
-        })
-        .build()
-
-    transformer.start(composition, tempFile.absolutePath)
+    runExport(context, composition, tempFile, fileName, onSuccess, onError)
 }

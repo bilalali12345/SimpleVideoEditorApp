@@ -29,7 +29,10 @@ import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import com.bilal.simplevideoeditorapp.ui.theme.SimpleVideoEditorAppTheme
+import com.bilal.simplevideoeditorapp.util.TrimMode
 import com.bilal.simplevideoeditorapp.util.computeClipRangeMs
+import com.bilal.simplevideoeditorapp.util.computeMiddleCutBoundsMs
+import com.bilal.simplevideoeditorapp.util.exportMiddleTrimmedVideo
 import com.bilal.simplevideoeditorapp.util.exportTrimmedVideo
 import com.bilal.simplevideoeditorapp.util.mergeVideos
 
@@ -490,34 +493,73 @@ fun VideoTrimScreen(
     if (showTrimDialog) {
         TrimPopup(
             onDismiss = { showTrimDialog = false },
-            onConfirm = { cutTimeInput, cutFromStart ->
+            onConfirm = { mode, primaryTime, secondaryTime ->
                 showTrimDialog = false
-
                 val durationMs = exoPlayer.duration
-                val range = computeClipRangeMs(cutTimeInput, cutFromStart, durationMs)
 
-                if (range == null) {
-                    Toast.makeText(
-                        context,
-                        "Please double check the time you entered.",
-                        Toast.LENGTH_LONG
-                    ).show()
-                } else {
-                    isProcessing = true
-                    exportTrimmedVideo(
-                        context = context,
-                        sourceUri = videoUri,
-                        startMs = range.first,
-                        endMs = range.second,
-                        onSuccess = { newUri ->
-                            isProcessing = false
-                            trimmedVideoUri = newUri
-                        },
-                        onError = { message ->
-                            isProcessing = false
-                            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                when (mode) {
+                    TrimMode.FROM_START, TrimMode.FROM_END -> {
+                        val range = computeClipRangeMs(
+                            cutTimeInput = primaryTime,
+                            cutFromStart = mode == TrimMode.FROM_START,
+                            videoDurationMs = durationMs
+                        )
+                        if (range == null) {
+                            Toast.makeText(
+                                context,
+                                "Please double check the time you entered.",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        } else {
+                            isProcessing = true
+                            exportTrimmedVideo(
+                                context = context,
+                                sourceUri = videoUri,
+                                startMs = range.first,
+                                endMs = range.second,
+                                onSuccess = { newUri ->
+                                    isProcessing = false
+                                    trimmedVideoUri = newUri
+                                },
+                                onError = { message ->
+                                    isProcessing = false
+                                    Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                                }
+                            )
                         }
-                    )
+                    }
+
+                    TrimMode.FROM_MIDDLE -> {
+                        val bounds = computeMiddleCutBoundsMs(
+                            removeStartInput = primaryTime,
+                            removeEndInput = secondaryTime,
+                            videoDurationMs = durationMs
+                        )
+                        if (bounds == null) {
+                            Toast.makeText(
+                                context,
+                                "Please double check the two times you entered.",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        } else {
+                            isProcessing = true
+                            exportMiddleTrimmedVideo(
+                                context = context,
+                                sourceUri = videoUri,
+                                removeStartMs = bounds.first,
+                                removeEndMs = bounds.second,
+                                videoDurationMs = durationMs,
+                                onSuccess = { newUri ->
+                                    isProcessing = false
+                                    trimmedVideoUri = newUri
+                                },
+                                onError = { message ->
+                                    isProcessing = false
+                                    Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                                }
+                            )
+                        }
+                    }
                 }
             }
         )
@@ -575,10 +617,16 @@ fun VideoTrimScreen(
 @Composable
 fun TrimPopup(
     onDismiss: () -> Unit,
-    onConfirm: (cutTime: String, cutFromStart: Boolean) -> Unit
+    onConfirm: (mode: TrimMode, primaryTime: String, secondaryTime: String) -> Unit
 ) {
-    var cutTime by remember { mutableStateOf("") }
-    var cutFromStart by remember { mutableStateOf(true) } // true = trim the beginning, false = trim the ending
+    var trimMode by remember { mutableStateOf(TrimMode.FROM_START) }
+    var primaryTime by remember { mutableStateOf("") }   // start-of-video field, or single cut point
+    var secondaryTime by remember { mutableStateOf("") } // only used in FROM_MIDDLE mode
+
+    val isReadyToConfirm = when (trimMode) {
+        TrimMode.FROM_START, TrimMode.FROM_END -> primaryTime.isNotBlank()
+        TrimMode.FROM_MIDDLE -> primaryTime.isNotBlank() && secondaryTime.isNotBlank()
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -595,48 +643,91 @@ fun TrimPopup(
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                // Simple two-button toggle, easier to tap than a switch for this use case
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
+                // Three big, stacked options - easier to tap correctly than a row of three.
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     ToggleOptionButton(
-                        text = "From Start",
-                        selected = cutFromStart,
-                        onClick = { cutFromStart = true },
-                        modifier = Modifier.weight(1f)
+                        text = "The Beginning",
+                        selected = trimMode == TrimMode.FROM_START,
+                        onClick = { trimMode = TrimMode.FROM_START },
+                        modifier = Modifier.fillMaxWidth()
                     )
                     ToggleOptionButton(
-                        text = "From End",
-                        selected = !cutFromStart,
-                        onClick = { cutFromStart = false },
-                        modifier = Modifier.weight(1f)
+                        text = "The Ending",
+                        selected = trimMode == TrimMode.FROM_END,
+                        onClick = { trimMode = TrimMode.FROM_END },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    ToggleOptionButton(
+                        text = "A Part in the Middle",
+                        selected = trimMode == TrimMode.FROM_MIDDLE,
+                        onClick = { trimMode = TrimMode.FROM_MIDDLE },
+                        modifier = Modifier.fillMaxWidth()
                     )
                 }
 
                 Spacer(modifier = Modifier.height(16.dp))
 
-                OutlinedTextField(
-                    value = cutTime,
-                    onValueChange = { cutTime = it },
-                    label = {
-                        Text(if (cutFromStart) "Cut off the beginning, up to:" else "Cut off the ending, starting at:")
-                    },
-                    placeholder = { Text("0:10") },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
-                )
+                when (trimMode) {
+                    TrimMode.FROM_START -> {
+                        OutlinedTextField(
+                            value = primaryTime,
+                            onValueChange = { primaryTime = it },
+                            label = { Text("Cut off the beginning, up to:") },
+                            placeholder = { Text("0:10") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "Everything from 0:00 to this time will be removed. The rest is kept.",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
 
-                Spacer(modifier = Modifier.height(8.dp))
+                    TrimMode.FROM_END -> {
+                        OutlinedTextField(
+                            value = primaryTime,
+                            onValueChange = { primaryTime = it },
+                            label = { Text("Cut off the ending, starting at:") },
+                            placeholder = { Text("0:50") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "Everything from this time to the end will be removed. The rest is kept.",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
 
-                Text(
-                    text = if (cutFromStart)
-                        "Everything from 0:00 to this time will be removed. The rest is kept."
-                    else
-                        "Everything from this time to the end will be removed. The rest is kept.",
-                    fontSize = 13.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                    TrimMode.FROM_MIDDLE -> {
+                        OutlinedTextField(
+                            value = primaryTime,
+                            onValueChange = { primaryTime = it },
+                            label = { Text("Start of the part to remove:") },
+                            placeholder = { Text("0:20") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        OutlinedTextField(
+                            value = secondaryTime,
+                            onValueChange = { secondaryTime = it },
+                            label = { Text("End of the part to remove:") },
+                            placeholder = { Text("0:35") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "The video between these two times will be removed, and the two remaining pieces joined together.",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
 
                 Spacer(modifier = Modifier.height(4.dp))
 
@@ -649,8 +740,8 @@ fun TrimPopup(
         },
         confirmButton = {
             Button(
-                onClick = { onConfirm(cutTime, cutFromStart) },
-                enabled = cutTime.isNotBlank()
+                onClick = { onConfirm(trimMode, primaryTime, secondaryTime) },
+                enabled = isReadyToConfirm
             ) {
                 Text("Cut", fontSize = 16.sp)
             }
